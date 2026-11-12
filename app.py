@@ -52,45 +52,18 @@ PLANTILLAS_IDIOMA = {
     },
 }
 
-# Clúster de nodos XTTS-v2 (CPU/GPU dedicados sin bloqueo de cuota)
+# Clúster de nodos XTTS-v2 (con respaldo automático)
 NODOS_XTTS = [
     "https://jymnils-voice-cloning-xtts-v2.hf.space/gradio_api",
     "https://yemenedu-voice-cloning-xtts-v2.hf.space/gradio_api",
     "https://hasanbasbunar-voice-cloning-xtts-v2.hf.space/gradio_api",
 ]
 
-# Clúster de nodos Seed-VC para refinamiento opcional de timbre
-NODOS_SEED_VC = [
-    "https://mtnproductions-seed-vc.hf.space/gradio_api",
-    "https://mmwmm-seed-vc.hf.space/gradio_api",
-    "https://plachta-seed-vc.hf.space/gradio_api",
-]
-
-# 1. Gestión de API Key y parámetros en la barra lateral
-default_key = os.getenv("ELEVENLABS_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-
+# 1. Parámetros acústicos en la barra lateral
 with st.sidebar:
-    st.header("⚙️ Configuración")
-    api_key = st.text_input(
-        "API Key (ElevenLabs / OpenAI)",
-        value=default_key,
-        type="password",
-        help="Si tienes plan de pago en ElevenLabs usa /v1/voices/add. Si tu cuenta es gratuita, activa automáticamente el motor End-to-End XTTS-v2 que clona tu voz real sin usar voces prefabricadas."
-    )
+    st.header("⚙️ Configuración Acústica")
+    st.caption("🎯 **Motor activo:** `Coqui XTTS-v2 End-to-End` (Clonación directa de tono, acento y timbre)")
 
-    modo_clonacion = st.radio(
-        "Motor de Clonación Zero-Shot:",
-        options=[
-            "🎯 XTTS-v2 Directo (Clona tu tono, acento y timbre)",
-            "🧬 XTTS-v2 + Refinamiento Difusión (Doble pasada)",
-            "🟣 ElevenLabs Nativo (Requiere plan Starter+)"
-        ],
-        index=0,
-        help="XTTS-v2 Directo genera el audio desde cero a partir de tu grabación (sin usar ninguna voz intermedia como George)."
-    )
-
-    st.divider()
-    st.subheader("Parámetros Acústicos")
     estabilidad = st.slider(
         "Estabilidad de voz",
         min_value=0.1,
@@ -125,7 +98,7 @@ with st.sidebar:
 # 2. Captura de audio desde el navegador
 st.subheader("Paso 1: Graba tu muestra de voz")
 if not usar_respaldo:
-    audio_grabado = st.audio_input("Habla claro durante 8 a 15 segundos acercaándote al micrófono (sin ruido de fondo)")
+    audio_grabado = st.audio_input("Habla claro durante 8 a 15 segundos acercándote al micrófono (sin ruido de fondo)")
 else:
     audio_grabado = st.file_uploader(
         "Sube tu muestra de voz (.wav recomendado)",
@@ -171,10 +144,9 @@ def clonar_voz_xtts_directo(
     Clona directamente el tono, ritmo, acento y timbre del usuario desde su grabación WAV
     usando Coqui XTTS-v2 (sin pasar por ninguna voz prefabricada).
     """
-    # Mapear sliders de estabilidad y similitud a los hiperparámetros reales de XTTS-v2
     temperature = round(max(0.15, min(1.0, 1.15 - (stab * 0.7))), 2)
     top_p = round(max(0.5, min(0.95, 1.0 - (sim * 0.25))), 2)
-    gpt_cond_len = int(round(15 + (sim * 30)))  # 15 a 45 segundos de ventana de condicionamiento
+    gpt_cond_len = int(round(15 + (sim * 30)))
 
     errores = []
     for base_url in NODOS_XTTS:
@@ -210,7 +182,7 @@ def clonar_voz_xtts_directo(
                 gpt_cond_len,             # gpt_cond_len (ventana de extracción de Speaker Embedding)
                 50,                       # top_k
                 top_p,                    # top_p
-                False,                    # remove_silence_enabled (False preserva la naturalidad de la voz)
+                False,                    # remove_silence_enabled
                 -45,                      # silence_threshold
                 300,                      # min_silence_len
                 150,                      # keep_silence
@@ -272,116 +244,6 @@ def clonar_voz_xtts_directo(
     raise RuntimeError("No se pudo completar la síntesis en los nodos XTTS-v2: " + " | ".join(errores))
 
 
-def refinar_timbre_seed_vc(bytes_audio_base: bytes, bytes_voz_usuario: bytes, sim: float) -> bytes:
-    """
-    Segunda pasada opcional de difusión acústica (Seed-VC) con intelligibility_cfg=0.0
-    para reforzar aún más el timbre espectral del usuario sobre el audio ya clonado por XTTS-v2.
-    """
-    for base_url in NODOS_SEED_VC:
-        try:
-            ip_rnd = f"{random.randint(11,190)}.{random.randint(1,254)}.{random.randint(1,254)}.{random.randint(1,254)}"
-            headers_nodo = {"X-Forwarded-For": ip_rnd}
-
-            up_src = requests.post(
-                f"{base_url}/upload",
-                headers=headers_nodo,
-                files=[("files", ("xtts_clon.mp3", bytes_audio_base, "audio/mpeg"))],
-                timeout=30
-            )
-            up_tgt = requests.post(
-                f"{base_url}/upload",
-                headers=headers_nodo,
-                files=[("files", ("voz_real.wav", bytes_voz_usuario, "audio/wav"))],
-                timeout=30
-            )
-            if up_src.status_code != 200 or up_tgt.status_code != 200:
-                continue
-
-            src_file = {"path": up_src.json()[0], "meta": {"_type": "gradio.FileData"}}
-            tgt_file = {"path": up_tgt.json()[0], "meta": {"_type": "gradio.FileData"}}
-
-            # intelligebility_cfg_rate = 0.0 para NO mezclar timbre ajeno y priorizar 100% la voz del usuario
-            payload = {
-                "data": [
-                    src_file,
-                    tgt_file,
-                    25,                     # diffusion_steps
-                    1.0,                    # length_adjust
-                    0.0,                    # intelligebility_cfg_rate = 0.0 (100% timbre objetivo)
-                    round(max(0.7, sim), 2),# similarity_cfg_rate
-                    0.9,
-                    1.0,
-                    1.0,
-                    False,
-                    False
-                ]
-            }
-            res_call = requests.post(f"{base_url}/call/predict", headers=headers_nodo, json=payload, timeout=30)
-            if res_call.status_code != 200 or "event_id" not in res_call.json():
-                continue
-
-            ev = res_call.json()["event_id"]
-            res_stream = requests.get(f"{base_url}/call/predict/{ev}", headers=headers_nodo, timeout=120)
-            if res_stream.status_code != 200:
-                continue
-
-            ultimo_json = None
-            for linea in res_stream.text.splitlines():
-                if linea.startswith("data: "):
-                    try:
-                        parsed = json.loads(linea[6:].strip())
-                        if isinstance(parsed, list) and len(parsed) >= 2 and isinstance(parsed[1], dict):
-                            ultimo_json = parsed[1]
-                    except Exception:
-                        continue
-
-            if ultimo_json and ultimo_json.get("url"):
-                res_wav = requests.get(ultimo_json["url"], headers=headers_nodo, timeout=60)
-                if res_wav.status_code == 200 and len(res_wav.content) > 1000:
-                    return res_wav.content
-        except Exception:
-            continue
-
-    return bytes_audio_base
-
-
-def clonar_elevenlabs_nativo(clave: str, bytes_voz_usuario: bytes, texto: str, stab: float, sim: float) -> bytes:
-    """Flujo nativo de ElevenLabs (/v1/voices/add) para cuentas con plan Starter o superior."""
-    headers = {"xi-api-key": clave.strip()}
-    voice_id = None
-    try:
-        res_clon = requests.post(
-            "https://api.elevenlabs.io/v1/voices/add",
-            headers=headers,
-            data={"name": "Voz_Taller_Temporal"},
-            files={"files": ("muestra_taller.wav", bytes_voz_usuario, "audio/wav")},
-            timeout=45
-        )
-        if res_clon.status_code != 200:
-            raise RuntimeError(f"ElevenLabs devolvió ({res_clon.status_code}): {res_clon.text}")
-
-        voice_id = res_clon.json()["voice_id"]
-        res_tts = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers=headers,
-            json={
-                "text": texto,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": stab,
-                    "similarity_boost": sim
-                }
-            },
-            timeout=60
-        )
-        if res_tts.status_code != 200:
-            raise RuntimeError(f"Error en TTS de ElevenLabs: {res_tts.text}")
-        return res_tts.content
-    finally:
-        if voice_id:
-            requests.delete(f"https://api.elevenlabs.io/v1/voices/{voice_id}", headers=headers, timeout=30)
-
-
 # 4. Ejecución del pipeline de clonación y síntesis
 if st.button("🚀 Clonar mi Voz y Generar Audio", type="primary", use_container_width=True):
     if not audio_grabado:
@@ -392,66 +254,27 @@ if st.button("🚀 Clonar mi Voz y Generar Audio", type="primary", use_container
         bytes_muestra_usuario = audio_grabado.getvalue()
 
         try:
-            if modo_clonacion.startswith("🟣"):
-                if not api_key.strip():
-                    st.error("Ingresa tu API Key de ElevenLabs en la barra lateral.")
-                    st.stop()
-                with st.spinner("Clonando voz directamente en ElevenLabs (`/v1/voices/add`)..."):
-                    audio_final = clonar_elevenlabs_nativo(
-                        api_key,
-                        bytes_muestra_usuario,
-                        texto_objetivo,
-                        estabilidad,
-                        similitud
-                    )
-                    formato_final = "audio/mp3"
-                    ext_final = "mp3"
-                    motor_usado = "ElevenLabs Instant Voice Cloning"
-
-            elif modo_clonacion.startswith("🧬"):
-                with st.spinner("Paso 1/2: Clonando tu voz, tono y cadencia desde tu grabación con XTTS-v2..."):
-                    audio_xtts, motor_usado = clonar_voz_xtts_directo(
-                        bytes_muestra_usuario,
-                        texto_objetivo,
-                        idioma_xtts,
-                        estabilidad,
-                        similitud,
-                        velocidad
-                    )
-                with st.spinner("Paso 2/2: Refinando el timbre espectral con difusión acústica (Seed-VC)..."):
-                    audio_final = refinar_timbre_seed_vc(
-                        audio_xtts,
-                        bytes_muestra_usuario,
-                        similitud
-                    )
-                    formato_final = "audio/wav" if audio_final != audio_xtts else "audio/mp3"
-                    ext_final = "wav" if audio_final != audio_xtts else "mp3"
-                    motor_usado = f"{motor_usado} + Seed-VC Diffusion"
-
-            else:
-                with st.spinner(f"Extrayendo tu Speaker Embedding y sintetizando en {idioma_xtts} con tu propia voz (XTTS-v2)..."):
-                    audio_final, motor_usado = clonar_voz_xtts_directo(
-                        bytes_muestra_usuario,
-                        texto_objetivo,
-                        idioma_xtts,
-                        estabilidad,
-                        similitud,
-                        velocidad
-                    )
-                    formato_final = "audio/mp3"
-                    ext_final = "mp3"
+            with st.spinner(f"Extrayendo tu Speaker Embedding y sintetizando en {idioma_xtts} con tu propia voz (XTTS-v2)..."):
+                audio_final, motor_usado = clonar_voz_xtts_directo(
+                    bytes_muestra_usuario,
+                    texto_objetivo,
+                    idioma_xtts,
+                    estabilidad,
+                    similitud,
+                    velocidad
+                )
 
             st.success("¡Voz clonada con éxito a partir de tu grabación!")
             st.caption(
                 f"🎙️ **Motor utilizado:** `{motor_usado}` | **Idioma:** `{idioma_xtts}` | "
                 f"**Condicionamiento acústico:** `{int(15 + similitud * 30)}s`"
             )
-            st.audio(audio_final, format=formato_final)
+            st.audio(audio_final, format="audio/mp3")
             st.download_button(
-                label=f"⬇️ Descargar mi voz clonada (.{ext_final})",
+                label="⬇️ Descargar mi voz clonada (.mp3)",
                 data=audio_final,
-                file_name=f"mi_voz_clonada.{ext_final}",
-                mime=formato_final,
+                file_name="mi_voz_clonada.mp3",
+                mime="audio/mp3",
                 use_container_width=True
             )
 
