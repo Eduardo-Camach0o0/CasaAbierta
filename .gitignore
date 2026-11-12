@@ -1,0 +1,26 @@
+# Variables de entorno y claves secretas (NUNCA subir a GitHub)
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Entornos virtuales de Python
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Archivos de audio temporales o generados en pruebas
+*.wav
+*.mp3
+*.ogg
+*.m4a
+!muestra_respaldo.wav
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
